@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NID AUTO - Stock & Inventaire SaaS</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: { extend: { colors: {
+                brand: { dark: '#0f172a', light: '#f8fafc', accent: '#3b82f6' },
+                modules: { green: '#10b981', blue: '#3b82f6', orange: '#f97316', pink: '#ec4899', yellow: '#eab308', red: '#ef4444', purple: '#8b5cf6', teal: '#14b8a6' }
+            }}}
+        }
+    </script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
+    <style>
+        body { transition: background-color 0.3s, color: 0.3s; }
+        .sidebar-item { transition: all 0.2s ease-in-out; }
+        .sidebar-item:hover { transform: translateX(5px); }
+        @keyframes blink-alert { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(1.2); } }
+        .blink-icon { animation: blink-alert 0.8s cubic-bezier(0.4, 0, 0.6, 1) infinite; color: #ef4444; }
+        @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .slide-up { animation: slideUp 0.25s ease-out; }
+        @media print { body * { visibility: hidden; } #drawer-content, #drawer-content * { visibility: visible; } #drawer-content { position: absolute; left: 0; top: 0; width: 100%; } .no-print { display: none !important; } }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-900 dark:bg-slate-900 dark:text-gray-100 font-sans antialiased">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useContext, createContext, useMemo, useRef } = React;
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyAjfVbLrhI7eNA7vyZ14P5RM4Yno_yA1Z8", authDomain: "nid-auto.firebaseapp.com",
+            projectId: "nid-auto", storageBucket: "nid-auto.firebasestorage.app",
+            messagingSenderId: "740964108943", appId: "1:740964108943:web:791b8b7cf9af613bc8befa"
+        };
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+
+        const AppContext = createContext();
+        const AppProvider = ({ children }) => {
+            const [activeModule, setActiveModule] = useState('dashboard');
+            const [darkMode, setDarkMode] = useState(false);
+            const [products, setProducts] = useState([]);
+            const [categories, setCategories] = useState([]);
+            const [documents, setDocuments] = useState([]);
+            const [notifications, setNotifications] = useState([]);
+            const [demands, setDemands] = useState([]);
+
+            const [emailConfig, setEmailConfig] = useState(() => {
+                try {
+                    const saved = localStorage.getItem('nidauto_emailjs');
+                    return saved ? JSON.parse(saved) : { serviceId: '', templateId: '', publicKey: '', fromName: 'NID AUTO' };
+                } catch (e) { return { serviceId: '', templateId: '', publicKey: '', fromName: 'NID AUTO' }; }
+            });
+
+            useEffect(() => { document.documentElement.classList[darkMode ? 'add' : 'remove']('dark'); }, [darkMode]);
+            useEffect(() => { const u = db.collection('products').onSnapshot(s => setProducts(s.docs.map(d => ({id: d.id, ...d.data()}))), e => console.error(e)); return () => u(); }, []);
+            useEffect(() => { const u = db.collection('categories').onSnapshot(s => setCategories(s.docs.map(d => ({id: d.id, ...d.data()}))), e => console.error(e)); return () => u(); }, []);
+            useEffect(() => { const u = db.collection('documents').orderBy('createdAt', 'desc').onSnapshot(s => setDocuments(s.docs.map(d => ({id: d.id, ...d.data(), createdAt: d.data().createdAt?.toDate() || new Date()}))), e => console.error(e)); return () => u(); }, []);
+            useEffect(() => { const u = db.collection('demands').orderBy('createdAt', 'desc').onSnapshot(s => setDemands(s.docs.map(d => ({id: d.id, ...d.data(), createdAt: d.data().createdAt?.toDate() || new Date()}))), e => console.error(e)); return () => u(); }, []);
+
+            const addNotification = (msg, type = 'info') => { const id = Date.now(); setNotifications(prev => [...prev, { id, msg, type }]); setTimeout(() => setNotifications(prev => prev.filter(n => n.id !== id)), 3500); };
+            const generateSKU = (catId) => { if (!catId) return ''; const cat = categories.find(c => c.id === catId); if (!cat) return ''; const w = cat.name.split(' ').filter(x => x.length > 0); let pfx = w.length >= 2 ? w[0].substring(0, 4).toUpperCase() + '-' + w[1].substring(0, 4).toUpperCase() : w[0].substring(0, 4).toUpperCase(); return `${pfx}-${(products.filter(p => p.categoryId === catId).length + 1).toString().padStart(4, '0')}`; };
+
+            const addProduct = async (d) => { try { await db.collection('products').add({...d, stock: parseInt(d.stock), minStock: parseInt(d.minStock), purchasePrice: parseFloat(d.purchasePrice), salePrice: parseFloat(d.salePrice), createdAt: firebase.firestore.FieldValue.serverTimestamp() }); addNotification("Produit ajouté", "success"); } catch(e) { console.error(e); } };
+            const updateProduct = async (id, d) => { try { await db.collection('products').doc(id).update({...d, stock: parseInt(d.stock), minStock: parseInt(d.minStock), purchasePrice: parseFloat(d.purchasePrice), salePrice: parseFloat(d.salePrice)}); addNotification("Produit mis à jour", "success"); } catch(e) { console.error(e); } };
+            const deleteProduct = async (id) => { try { await db.collection('products').doc(id).delete(); addNotification("Produit supprimé", "success"); } catch(e) { console.error(e); } };
+            const updateProductStock = (pid, ns) => db.collection('products').doc(pid).update({ stock: ns });
+            const addCategory = async (n) => { try { await db.collection('categories').add({ name: n, createdAt: firebase.firestore.FieldValue.serverTimestamp() }); addNotification("Catégorie créée", "success"); } catch(e) { console.error(e); } };
+            const updateCategory = async (id, n) => { try { await db.collection('categories').doc(id).update({ name: n }); addNotification("Catégorie modifiée", "success"); } catch(e) { console.error(e); } };
+            const deleteCategory = async (id) => { try { await db.collection('categories').doc(id).delete(); addNotification("Catégorie supprimée", "success"); } catch(e) { console.error(e); } };
+            const addDocument = async (d) => { try { await db.collection('documents').add({...d, status: 'pending', createdAt: firebase.firestore.FieldValue.serverTimestamp()}); addNotification("Document généré", "success"); } catch(e) { console.error(e); } };
+
+            const updateDocumentStatus = async (id, newStatus) => {
+                try {
+                    const docSnap = await db.collection('documents').doc(id).get();
+                    if (!docSnap.exists) return;
+                    const data = docSnap.data(); const oldStatus = data.status;
+                    if (newStatus === 'cancelled' && oldStatus !== 'cancelled') {
+                        for (const item of (data.items || [])) { if (!item.productId) continue; const pRef = db.collection('products').doc(item.productId); const pSnap = await pRef.get(); if (pSnap.exists) { const cur = pSnap.data().stock || 0; const qty = parseInt(item.quantity) || 0; if (data.type === 'out') await pRef.update({ stock: cur + qty }); if (data.type === 'entry') await pRef.update({ stock: Math.max(0, cur - qty) }); } }
+                        addNotification("Document annulé — stock reversé", "success");
+                    }
+                    if (newStatus === 'validated' && oldStatus === 'cancelled') {
+                        for (const item of (data.items || [])) { if (!item.productId) continue; const pRef = db.collection('products').doc(item.productId); const pSnap = await pRef.get(); if (pSnap.exists) { const cur = pSnap.data().stock || 0; const qty = parseInt(item.quantity) || 0; if (data.type === 'out') await pRef.update({ stock: Math.max(0, cur - qty) }); if (data.type === 'entry') await pRef.update({ stock: cur + qty }); } }
+                        addNotification("Document revalidé — stock ajusté", "success");
+                    }
+                    if (newStatus === 'validated' && oldStatus === 'pending') addNotification("Document validé", "success");
+                    await db.collection('documents').doc(id).update({ status: newStatus });
+                } catch(e) { console.error(e); addNotification("Erreur de mise à jour", "error"); }
+            };
+
+            const addDemand = async (d) => { try { await db.collection('demands').add({...d, status: 'pending', createdAt: firebase.firestore.FieldValue.serverTimestamp()}); addNotification("Demande ajoutée", "success"); } catch(e) { console.error(e); } };
+            const updateDemand = async (id, d) => { try { await db.collection('demands').doc(id).update(d); addNotification("Demande modifiée", "success"); } catch(e) { console.error(e); } };
+            const deleteDemand = async (id) => { try { await db.collection('demands').doc(id).delete(); addNotification("Demande supprimée", "success"); } catch(e) { console.error(e); } };
+
+            const saveEmailConfig = (c) => { setEmailConfig(c); try { localStorage.setItem('nidauto_emailjs', JSON.stringify(c)); } catch(e) {} addNotification("Configuration EmailJS sauvegardée", "success"); };
+
+            const sendEmail = async (to, subject, body) => {
+                if (!emailConfig.serviceId || !emailConfig.templateId || !emailConfig.publicKey) { addNotification("Configurez EmailJS en bas de la page Email d'abord", "error"); return false; }
+                if (!to.trim()) { addNotification("Veuillez entrer un destinataire", "error"); return false; }
+                if (typeof emailjs === 'undefined') { addNotification("Bibliothèque EmailJS non chargée.", "error"); return false; }
+                try {
+                    emailjs.init(emailConfig.publicKey);
+                    await emailjs.send(emailConfig.serviceId, emailConfig.templateId, { to_email: to, subject: subject, message: body, from_name: emailConfig.fromName || 'NID AUTO' });
+                    addNotification("Email envoyé avec succès à " + to, "success"); return true;
+                } catch(e) { addNotification("Erreur EmailJS : " + (e.text || e.message), "error"); return false; }
+            };
+
+            return (
+                <AppContext.Provider value={{ activeModule, setActiveModule, darkMode, setDarkMode, products, addProduct, updateProduct, deleteProduct, updateProductStock, generateSKU, categories, addCategory, updateCategory, deleteCategory, documents, addDocument, updateDocumentStatus, demands, addDemand, updateDemand, deleteDemand, notifications, emailConfig, saveEmailConfig, sendEmail }}>
+                    {children}
+                </AppContext.Provider>
+            );
+        };
+
+        const Icon = ({ name, size = 20, className }) => { useEffect(() => { lucide.createIcons(); }, [name]); return <i data-lucide={name} width={size} height={size} className={className}></i>; };
+        const Card = ({ title, children, className = "" }) => (<div className={`bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-gray-100 dark:border-slate-700 p-6 ${className}`}>{title && <h3 className="text-lg font-semibold mb-4 text-gray-800 dark:text-gray-200">{title}</h3>}{children}</div>);
+        const Badge = ({ children, color = 'gray' }) => { const c = { gray: 'bg-gray-100 text-gray-800 dark:bg-slate-700 dark:text-slate-300', green: 'bg-green-100 text-green-800', red: 'bg-red-100 text-red-800', yellow: 'bg-yellow-100 text-yellow-800', blue: 'bg-blue-100 text-blue-800', teal: 'bg-teal-100 text-teal-800' }; return <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${c[color]}`}>{children}</span>; };
+        const ToastContainer = () => { const { notifications } = useContext(AppContext); const s = { success: 'bg-emerald-600', error: 'bg-red-600', info: 'bg-slate-800' }; return (<div className="fixed bottom-4 left-4 z-[60] flex flex-col gap-2">{notifications.map(n => (<div key={n.id} className={`${s[n.type] || s.info} text-white px-4 py-3 rounded-lg shadow-lg flex items-center gap-2 slide-up`}><Icon name={n.type === 'success' ? 'check-circle' : n.type === 'error' ? 'alert-circle' : 'info'} size={16} /><span>{n.msg}</span></div>))}</div>); };
+
+        // ── CENTRE EMAIL & RAPPORTS ──
+        const EmailCenter = () => {
+            const { products, categories, documents, demands, emailConfig, saveEmailConfig, sendEmail, addNotification } = useContext(AppContext);
+            const [to, setTo] = useState(''); const [subject, setSubject] = useState(''); const [body, setBody] = useState(''); const [sending, setSending] = useState(false);
+            const [imagePreview, setImagePreview] = useState(null); const [imageBase64, setImageBase64] = useState('');
+            const [selectedProduct, setSelectedProduct] = useState(''); const [selectedDocument, setSelectedDocument] = useState(''); const [selectedDemand, setSelectedDemand] = useState('');
+            const [config, setConfig] = useState({ ...emailConfig }); const [testEmail, setTestEmail] = useState(''); const [testing, setTesting] = useState(false);
+
+            const handleImageChange = (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    if (file.size > 500000) { addNotification("Image trop lourde (max 500ko)", "error"); return; }
+                    const reader = new FileReader();
+                    reader.onloadend = () => { setImageBase64(reader.result); setImagePreview(reader.result); };
+                    reader.readAsDataURL(file);
+                }
+            };
+
+            const insertProductInfo = () => { const p = products.find(pr => pr.id === selectedProduct); if (!p) return; const catName = categories.find(c => c.id === p.categoryId)?.name || 'N/A'; setBody(prev => prev + `\n\n--- Informations Produit ---\nNom: ${p.name}\nRéf: ${p.sku}\nCatégorie: ${catName}\nStock: ${p.stock} unités\nPrix de vente: ${(p.salePrice||0).toLocaleString()} CFA`); setSelectedProduct(''); };
+            const insertDocumentInfo = () => { const d = documents.find(doc => doc.id === selectedDocument); if (!d) return; setBody(prev => prev + `\n\n--- Document ${d.ref} ---\nType: ${d.type === 'entry' ? 'Entrée' : 'Sortie'}\nTiers: ${d.clientName}\nTotal: ${(d.total||0).toLocaleString()} CFA\nStatut: ${d.status}`); setSelectedDocument(''); };
+            const insertDemandInfo = () => { const d = demands.find(dem => dem.id === selectedDemand); if (!d) return; const catName = categories.find(c => c.id === d.categoryId)?.name || 'N/A'; setBody(prev => prev + `\n\n--- Demande Client ---\nClient: ${d.clientName} (${d.clientEmail || 'Pas d\'email'})\nPièce: ${d.partName}\nCatégorie: ${catName}\nStatut: ${d.status === 'arrived' ? 'Arrivée' : 'En attente'}`); if (d.clientEmail) setTo(d.clientEmail); setSelectedDemand(''); };
+            const insertLowStockReport = () => { const lowProds = products.filter(p => p.stock <= p.minStock); if (lowProds.length === 0) { addNotification("Aucun produit en stock bas", "info"); return; } let text = "\n\n--- RAPPORT STOCK BAS ---\n"; lowProds.forEach(p => { text += `- ${p.name} (Stock: ${p.stock} / Min: ${p.minStock})\n`; }); setBody(prev => prev + text); };
+
+            const handleSend = async () => {
+                setSending(true);
+                let textWithBreaks = body.replace(/\n/g, '<br>');
+                let imageHtml = imageBase64 ? `<br><hr style="border:none;border-top:1px solid #e2e8f0;margin:16px 0"><p style="color:#64748b;font-size:12px;">Image jointe :</p><img src="${imageBase64}" style="max-width:100%;border-radius:8px;border:1px solid #e2e8f0" />` : '';
+                let html = `<div style="font-family:sans-serif;font-size:14px;color:#1e293b">${textWithBreaks}${imageHtml}</div>`;
+                await sendEmail(to, subject, html);
+                setSending(false);
+            };
+
+            const handleSaveConfig = () => { if (!config.serviceId || !config.templateId || !config.publicKey) { addNotification("Tous les champs EmailJS sont requis", "error"); return; } saveEmailConfig(config); };
+            const handleTest = async () => { if (!testEmail.trim()) return; setTesting(true); await sendEmail(testEmail, 'Test NID AUTO', '<h2>Test Email</h2><p>Configuration fonctionnelle !</p>'); setTesting(false); };
+
+            return (
+                <div className="p-6 space-y-6 h-[calc(100vh-80px)] overflow-y-auto">
+                    <h2 className="text-2xl font-bold dark:text-white flex items-center gap-2"><Icon name="mail" size={28} className="text-modules-blue" /> Email & Rapports</h2>
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <div className="lg:col-span-2 space-y-6">
+                            <Card title="Rédiger un message">
+                                <div className="space-y-4">
+                                    <div><label className="block text-sm font-medium mb-1.5">Destinataire</label><input type="email" className="w-full p-2.5 border border-gray-300 dark:border-slate-600 rounded-lg dark:bg-slate-700 outline-none focus:ring-2 focus:ring-blue-500" value={to} onChange={e => setTo(e.target.value)} placeholder="client@exemple.com" /></div>
+                                    <div><label className="block text-sm font-medium mb-1.5">Sujet</label><input type="text" className="w-full p-2.5 border border-gray-300 dark:border-slate-600 rounded-lg dark:bg-slate-700 outline-none focus:ring-2 focus:ring-blue-500" value={subject} onChange={e => setSubject(e.target.value)} placeholder="Sujet de l'email" /></div>
+                                    <div><label className="block text-sm font-medium mb-1.5">Message</label><textarea className="w-full p-2.5 border border-gray-300 dark:border-slate-600 rounded-lg dark:bg-slate-700 outline-none focus:ring-2 focus:ring-blue-500 resize-y" rows="12" value={body} onChange={e => setBody(e.target.value)} placeholder="Tapez votre message ici..." /></div>
+                                    <div><label className="block text-sm font-medium mb-1.5">Joindre une image (Max 500ko)</label><input type="file" accept="image/*" onChange={handleImageChange} className="w-full text-sm" />{imagePreview && <img src={imagePreview} className="w-32 h-32 rounded mt-2 object-cover border" />}</div>
+                                    <button onClick={handleSend} disabled={sending} className="w-full py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center justify-center gap-2 disabled:opacity-50 font-bold shadow-md shadow-blue-500/20"><Icon name="send" size={18} /> {sending ? 'Envoi en cours...' : 'Envoyer l\'email'}</button>
+                                </div>
+                            </Card>
+                        </div>
+                        <div className="space-y-6">
+                            <Card title="Insérer des données">
+                                <div className="space-y-4">
+                                    <div><label className="block text-sm mb-1 font-medium">Produit</label><div className="flex gap-2"><select className="flex-1 p-2 border rounded-lg dark:bg-slate-700 dark:border-slate-600 outline-none text-sm" value={selectedProduct} onChange={e => setSelectedProduct(e.target.value)}><option value="">Choisir...</option>{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select><button onClick={insertProductInfo} disabled={!selectedProduct} className="px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-xs">Ajouter</button></div></div>
+                                    <div><label className="block text-sm mb-1 font-medium">Document</label><div className="flex gap-2"><select className="flex-1 p-2 border rounded-lg dark:bg-slate-700 dark:border-slate-600 outline-none text-sm" value={selectedDocument} onChange={e => setSelectedDocument(e.target.value)}><option value="">Choisir...</option>{documents.map(d => <option key={d.id} value={d.id}>{d.ref}</option>)}</select><button onClick={insertDocumentInfo} disabled={!selectedDocument} className="px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-xs">Ajouter</button></div></div>
+                                    <div><label className="block text-sm mb-1 font-medium">Demande Client</label><div className="flex gap-2"><select className="flex-1 p-2 border rounded-lg dark:bg-slate-700 dark:border-slate-600 outline-none text-sm" value={selectedDemand} onChange={e => setSelectedDemand(e.target.value)}><option value="">Choisir...</option>{demands.map(d => <option key={d.id} value={d.id}>{d.clientName} - {d.partName}</option>)}</select><button onClick={insertDemandInfo} disabled={!selectedDemand} className="px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-xs">Ajouter</button></div></div>
+                                    <div className="pt-2 border-t dark:border-slate-700"><button onClick={insertLowStockReport} className="w-full py-2 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800 rounded-lg hover:bg-red-100 flex items-center justify-center gap-2 text-sm font-semibold"><Icon name="alert-triangle" size={16} /> Insérer Rapport Stock Bas</button></div>
+                                </div>
+                            </Card>
+                            <Card title="Configuration EmailJS">
+                                <div className="space-y-3">
+                                    <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 p-3 rounded-lg text-xs text-amber-700 dark:text-amber-300">
+                                        <strong>ATTENTION :</strong> Dans votre Template EmailJS, vous DEVEZ utiliser <code className="bg-amber-100 dark:bg-amber-900/50 px-1 rounded">{'{{{message}}}'}</code> (3 accolades) et non pas 2, sinon le destinataire verra le code HTML brut.
+                                    </div>
+                                    <div><label className="block text-xs mb-1 font-medium">Service ID</label><input type="text" className="w-full p-2 border rounded-lg dark:bg-slate-700 dark:border-slate-600 outline-none text-sm" value={config.serviceId} onChange={e => setConfig({...config, serviceId: e.target.value})} placeholder="service_xxx" /></div>
+                                    <div><label className="block text-xs mb-1 font-medium">Template ID</label><input type="text" className="w-full p-2 border rounded-lg dark:bg-slate-700 dark:border-slate-600 outline-none text-sm" value={config.templateId} onChange={e => setConfig({...config, templateId: e.target.value})} placeholder="template_xxx" /></div>
+                                    <div><label className="block text-xs mb-1 font-medium">Public Key</label><input type="text" className="w-full p-2 border rounded-lg dark:bg-slate-700 dark:border-slate-600 outline-none text-sm" value={config.publicKey} onChange={e => setConfig({...config, publicKey: e.target.value})} placeholder="xxx" /></div>
+                                    <button onClick={handleSaveConfig} className="w-full py-2 bg-slate-800 dark:bg-slate-600 text-white font-bold rounded-lg hover:bg-slate-700 text-sm">Sauvegarder Config</button>
+                                    <div className="flex gap-2 pt-2"><input type="email" className="flex-1 p-2 border rounded-lg dark:bg-slate-700 dark:border-slate-600 outline-none text-sm" value={testEmail} onChange={e => setTestEmail(e.target.value)} placeholder="Email test" /><button onClick={handleTest} disabled={testing} className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium">{testing ? 'Envoi...' : 'Test'}</button></div>
+                                </div>
+                            </Card>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // ── MARCHANDISES (CORRECTION GROUPES) ──
+        const Merchandise = () => {
+            // CORRECTION ICI : Ajout de addCategory, updateCategory, deleteCategory
+            const { products, categories, addProduct, updateProduct, deleteProduct, generateSKU, addCategory, updateCategory, deleteCategory } = useContext(AppContext);
+            const [searchTerm, setSearchTerm] = useState(""); const [showModal, setShowModal] = useState(false); const [showCatModal, setShowCatModal] = useState(false); const [editingProduct, setEditingProduct] = useState(null); const [newCatName, setNewCatName] = useState('');
+            const emptyForm = { sku: '', name: '', categoryId: '', purchasePrice: '', salePrice: '', stock: 0, minStock: 5, image: '' };
+            const [formData, setFormData] = useState(emptyForm); const [imagePreview, setImagePreview] = useState(null);
+            const handleImageChange = (e) => { const f = e.target.files[0]; if (f) { const r = new FileReader(); r.onloadend = () => { setFormData({...formData, image: r.result}); setImagePreview(r.result); }; r.readAsDataURL(f); } };
+            const openEditModal = (p) => { setEditingProduct(p.id); setFormData(p); setImagePreview(p.image); setShowModal(true); };
+            const openAddModal = () => { setEditingProduct(null); setFormData(emptyForm); setImagePreview(null); setShowModal(true); };
+            const handleSubmit = (e) => { e.preventDefault(); if (editingProduct) { updateProduct(editingProduct, formData); } else { addProduct(formData); } setShowModal(false); };
+            const filteredProducts = useMemo(() => products.filter(p => p.name.toLowerCase().includes(searchTerm.toLowerCase()) || p.sku.toLowerCase().includes(searchTerm.toLowerCase())).sort((a, b) => a.name.localeCompare(b.name)), [products, searchTerm]);
+
+            return (
+                <div className="p-6 space-y-6 h-[calc(100vh-80px)] overflow-y-auto">
+                    <div className="flex flex-col md:flex-row justify-between md:items-center gap-4">
+                        <h2 className="text-2xl font-bold text-gray-800 dark:text-white flex items-center gap-2"><Icon name="box" size={28} className="text-modules-green" /> Marchandises</h2>
+                        <div className="flex gap-2"><button onClick={() => setShowCatModal(true)} className="flex items-center gap-2 px-4 py-2 bg-gray-100 dark:bg-slate-700 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-600"><Icon name="folder-plus" size={18} /> Groupes</button><button onClick={openAddModal} className="flex items-center gap-2 px-4 py-2 bg-brand-accent text-white rounded-lg hover:bg-blue-600 shadow-md shadow-blue-500/20"><Icon name="plus-circle" size={18} /> Ajouter</button></div>
+                    </div>
+                    <Card className="p-4"><div className="relative"><Icon name="search" className="absolute left-3 top-3 text-gray-400" size={18} /><input type="text" placeholder="Rechercher..." className="w-full pl-10 pr-4 py-2 bg-white dark:bg-slate-900 border border-gray-300 dark:border-slate-600 rounded-lg outline-none" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} /></div></Card>
+                    <Card className="overflow-hidden p-0 shadow-none border-none"><div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-gray-50 dark:bg-slate-700 uppercase font-semibold text-xs"><tr><th className="px-4 py-4">Image</th><th className="px-4 py-4">Référence</th><th className="px-4 py-4">Groupe</th><th className="px-4 py-4 text-right">Prix</th><th className="px-4 py-4 text-center">Stock</th><th className="px-4 py-4 text-center">Statut</th><th className="px-4 py-4 text-center">Actions</th></tr></thead>
+                    <tbody className="divide-y divide-gray-200 dark:divide-slate-700">
+                        {filteredProducts.map(p => ( <tr key={p.id} className="hover:bg-gray-50 dark:hover:bg-slate-700/50">
+                            <td className="px-4 py-4">{p.image ? <img src={p.image} alt={p.name} className="w-12 h-12 rounded object-cover border" /> : <div className="w-12 h-12 rounded bg-gray-100 dark:bg-slate-700 flex items-center justify-center"><Icon name="image" size={20} className="text-gray-400" /></div>}</td>
+                            <td className="px-4 py-4"><div className="font-bold text-gray-900 dark:text-white">{p.name}</div><div className="text-xs text-gray-500 font-mono">{p.sku}</div></td>
+                            <td className="px-4 py-4"><Badge color="blue">{categories.find(c => c.id === p.categoryId)?.name || 'N/A'}</Badge></td>
+                            <td className="px-4 py-4 text-right font-bold">{(p.salePrice || 0).toLocaleString()} CFA</td>
+                            <td className="px-4 py-4 text-center font-bold text-lg">{p.stock}</td>
+                            <td className="px-4 py-4 text-center flex justify-center">{p.stock <= p.minStock ? <div className="flex items-center gap-2"><Icon name="alert-triangle" size={18} className="blink-icon" /><Badge color="red">Bas</Badge></div> : <Badge color="green">OK</Badge>}</td>
+                            <td className="px-4 py-4 text-center"><div className="flex justify-center gap-1"><button onClick={() => openEditModal(p)} className="p-1.5 text-amber-500 hover:bg-amber-50 dark:hover:bg-slate-700 rounded"><Icon name="edit" size={16} /></button><button onClick={() => deleteProduct(p.id)} className="p-1.5 text-red-500 hover:bg-red-50 dark:hover:bg-slate-700 rounded"><Icon name="trash-2" size={16} /></button></div></td></tr> ))}
+                    </tbody></table></div></Card>
+                    {showModal && (<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm"><div className="bg-white dark:bg-slate-800 rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto"><div className="p-6 border-b dark:border-slate-700 flex justify-between items-center"><h3 className="text-xl font-bold dark:text-white">{editingProduct ? 'Modifier' : 'Ajouter'} Article</h3><button onClick={() => setShowModal(false)}><Icon name="x" size={24} className="text-gray-400" /></button></div><form onSubmit={handleSubmit} className="p-6 space-y-4"><div className="grid grid-cols-1 md:grid-cols-2 gap-4"><div><label className="block text-sm mb-1">SKU</label><input readOnly type="text" className="w-full p-2 border rounded dark:bg-slate-700 bg-gray-100" value={formData.sku} /></div><div><label className="block text-sm mb-1">Nom</label><input required type="text" className="w-full p-2 border rounded dark:bg-slate-700" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} /></div></div><div><label className="block text-sm mb-1">Catégorie</label><select required className="w-full p-2 border rounded dark:bg-slate-700" value={formData.categoryId} onChange={e => setFormData({...formData, categoryId: e.target.value, sku: generateSKU(e.target.value)})}><option value="">Sélectionner</option>{categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div><div className="grid grid-cols-3 gap-4"><div><label className="block text-sm mb-1">Prix Achat</label><input required type="number" step="1" className="w-full p-2 border rounded dark:bg-slate-700" value={formData.purchasePrice} onChange={e => setFormData({...formData, purchasePrice: e.target.value})} /></div><div><label className="block text-sm mb-1">Prix Vente</label><input required type="number" step="1" className="w-full p-2 border rounded dark:bg-slate-700" value={formData.salePrice} onChange={e => setFormData({...formData, salePrice: e.target.value})} /></div><div><label className="block text-sm mb-1">Stock</label><input required type="number" className="w-full p-2 border rounded dark:bg-slate-700" value={formData.stock} onChange={e => setFormData({...formData, stock: e.target.value})} /></div></div><div><label className="block text-sm mb-1">Stock Min</label><input required type="number" className="w-full p-2 border rounded dark:bg-slate-700" value={formData.minStock} onChange={e => setFormData({...formData, minStock: e.target.value})} /></div><div><label className="block text-sm mb-1">Image</label><input type="file" accept="image/*" onChange={handleImageChange} className="w-full text-sm" />{imagePreview && <img src={imagePreview} className="w-16 h-16 rounded mt-2 object-cover" />}</div><button type="submit" className="w-full py-3 bg-brand-accent text-white font-bold rounded-lg hover:bg-blue-600">{editingProduct ? 'Enregistrer' : 'Ajouter'}</button></form></div></div>)}
+                    {showCatModal && (<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm"><div className="bg-white dark:bg-slate-800 rounded-xl shadow-2xl w-full max-w-md p-6"><h3 className="text-xl font-bold mb-4 dark:text-white">Groupes</h3><div className="space-y-2 mb-4 max-h-60 overflow-y-auto">{categories.map(c => (<div key={c.id} className="flex items-center justify-between bg-gray-50 dark:bg-slate-700 p-2 rounded"><input type="text" className="flex-1 bg-transparent p-1 dark:text-white" defaultValue={c.name} onBlur={e => { if (e.target.value !== c.name) updateCategory(c.id, e.target.value); }} /><button onClick={() => deleteCategory(c.id)} className="text-red-500 p-1"><Icon name="trash-2" size={16} /></button></div>))}</div><div className="flex gap-2"><input type="text" className="flex-1 p-2 border rounded dark:bg-slate-700" placeholder="Nouveau" value={newCatName} onChange={e => setNewCatName(e.target.value)} /><button onClick={() => { if (newCatName) { addCategory(newCatName); setNewCatName(''); } }} className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">Créer</button></div><button onClick={() => setShowCatModal(false)} className="mt-4 w-full py-2 text-gray-500 hover:bg-gray-100 rounded">Fermer</button></div></div>)}
+                </div>
+            );
+        };
+
+        // ── DEMANDES ──
+        const Demands = () => {
+            const { demands, addDemand, updateDemand, deleteDemand, categories, addProduct, generateSKU, addNotification, addDocument } = useContext(AppContext);
+            const [showModal, setShowModal] = useState(false); const [showArrivalModal, setShowArrivalModal] = useState(null); const [editingDemand, setEditingDemand] = useState(null);
+            const emptyForm = { clientName: '', clientPhone: '', clientEmail: '', partName: '', categoryId: '', description: '', image: '' };
+            const [formData, setFormData] = useState(emptyForm); const [arrivalData, setArrivalData] = useState({ purchasePrice: 0, salePrice: 0, quantity: 1 });
+            const handleImageChange = (e) => { const f = e.target.files[0]; if (f) { const r = new FileReader(); r.onloadend = () => setFormData({...formData, image: r.result}); r.readAsDataURL(f); } };
+            const handleSubmit = (e) => { e.preventDefault(); if (editingDemand) { updateDemand(editingDemand.id, formData); } else { addDemand(formData); } setShowModal(false); setFormData(emptyForm); setEditingDemand(null); };
+            const openEdit = (d) => { setEditingDemand(d); setFormData(d); setShowModal(true); };
+            const handleArrival = () => {
+                if (!showArrivalModal) return; const d = showArrivalModal; const catName = categories.find(c => c.id === d.categoryId)?.name || 'N/A'; const price = parseFloat(arrivalData.salePrice) || 0; const qty = parseInt(arrivalData.quantity) || 1;
+                addProduct({ name: d.partName, categoryId: d.categoryId, sku: generateSKU(d.categoryId), purchasePrice: parseFloat(arrivalData.purchasePrice), salePrice: price, stock: qty, minStock: 1, image: d.image });
+                addDocument({ ref: `ENT-${new Date().getFullYear()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`, type: 'entry', clientName: d.clientName || 'Divers', items: [{ productName: d.partName, categoryName: catName, quantity: qty, price }], total: qty * price, arrivalDate: new Date().toISOString() });
+                updateDemand(d.id, { status: 'arrived' });
+                setShowArrivalModal(null); addNotification("Pièce ajoutée au stock", "success");
+            };
+            return (
+                <div className="p-6 space-y-6 h-[calc(100vh-80px)] overflow-y-auto">
+                    <div className="flex flex-col md:flex-row justify-between md:items-center gap-4"><h2 className="text-2xl font-bold dark:text-white flex items-center gap-2"><Icon name="clipboard-list" size={28} className="text-modules-teal" /> Demandes</h2><button onClick={() => { setEditingDemand(null); setFormData(emptyForm); setShowModal(true); }} className="flex items-center gap-2 px-4 py-2 bg-modules-teal text-white rounded-lg hover:bg-teal-700 shadow-md"><Icon name="plus-circle" size={18} /> Nouvelle</button></div>
+                    <Card className="overflow-hidden p-0 shadow-none border-none"><div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-gray-50 dark:bg-slate-700 uppercase font-semibold text-xs"><tr><th className="p-4">Client</th><th className="p-4">Pièce</th><th className="p-4">Catégorie</th><th className="p-4">Statut</th><th className="p-4">Actions</th></tr></thead><tbody className="divide-y divide-gray-200 dark:divide-slate-700">
+                    {demands.map(d => (<tr key={d.id} className="hover:bg-gray-50 dark:hover:bg-slate-700/50">
+                        <td className="p-4"><div className="font-bold">{d.clientName}</div><div className="text-xs text-gray-500">{d.clientPhone || 'N/A'}</div>{d.clientEmail && <div className="text-xs text-blue-500">{d.clientEmail}</div>}</td>
+                        <td className="p-4 font-medium">{d.partName}</td><td className="p-4"><Badge color="blue">{categories.find(c => c.id === d.categoryId)?.name || 'N/A'}</Badge></td>
+                        <td className="p-4">{d.status === 'arrived' ? <Badge color="green">Arrivée</Badge> : <Badge color="teal">En attente</Badge>}</td>
+                        <td className="p-4"><div className="flex gap-1">{d.status !== 'arrived' && <button onClick={() => setShowArrivalModal(d)} className="p-1.5 text-green-600 hover:bg-green-50 dark:hover:bg-slate-700 rounded" title="Arrivée"><Icon name="package-check" size={16} /></button>}<button onClick={() => openEdit(d)} className="p-1.5 text-amber-500 hover:bg-amber-50 dark:hover:bg-slate-700 rounded"><Icon name="edit" size={16} /></button><button onClick={() => deleteDemand(d.id)} className="p-1.5 text-red-500 hover:bg-red-50 dark:hover:bg-slate-700 rounded"><Icon name="trash-2" size={16} /></button></div></td>
+                    </tr>))}</tbody></table></div></Card>
+                    {showModal && (<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm"><div className="bg-white dark:bg-slate-800 rounded-xl shadow-2xl w-full max-w-lg p-6"><h3 className="text-xl font-bold mb-4 dark:text-white">{editingDemand ? 'Modifier' : 'Nouvelle'} Demande</h3><form onSubmit={handleSubmit} className="space-y-3"><div className="grid grid-cols-2 gap-3"><div><label className="block text-sm mb-1">Nom</label><input required type="text" className="w-full p-2 border rounded dark:bg-slate-700" value={formData.clientName} onChange={e => setFormData({...formData, clientName: e.target.value})} /></div><div><label className="block text-sm mb-1">Tel</label><input type="tel" className="w-full p-2 border rounded dark:bg-slate-700" value={formData.clientPhone} onChange={e => setFormData({...formData, clientPhone: e.target.value})} /></div></div><div><label className="block text-sm mb-1">Email</label><input type="email" className="w-full p-2 border rounded dark:bg-slate-700" value={formData.clientEmail} onChange={e => setFormData({...formData, clientEmail: e.target.value})} /></div><div><label className="block text-sm mb-1">Pièce</label><input required type="text" className="w-full p-2 border rounded dark:bg-slate-700" value={formData.partName} onChange={e => setFormData({...formData, partName: e.target.value})} /></div><div><label className="block text-sm mb-1">Catégorie</label><select required className="w-full p-2 border rounded dark:bg-slate-700" value={formData.categoryId} onChange={e => setFormData({...formData, categoryId: e.target.value})}><option value="">Choisir</option>{categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div><div><label className="block text-sm mb-1">Image</label><input type="file" accept="image/*" onChange={handleImageChange} className="w-full text-sm" /></div><div><label className="block text-sm mb-1">Description</label><textarea className="w-full p-2 border rounded dark:bg-slate-700" rows="2" value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} /></div><div className="flex justify-end gap-2 pt-2"><button type="button" onClick={() => setShowModal(false)} className="px-4 py-2 text-gray-500 hover:bg-gray-100 rounded">Annuler</button><button type="submit" className="px-4 py-2 bg-modules-teal text-white rounded hover:bg-teal-700">Enregistrer</button></div></form></div></div>)}
+                    {showArrivalModal && (<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm"><div className="bg-white dark:bg-slate-800 rounded-xl shadow-2xl w-full max-w-md p-6"><h3 className="text-xl font-bold mb-2 dark:text-white">Arrivage : {showArrivalModal.partName}</h3><div className="space-y-3"><div><label className="block text-sm mb-1">Quantité</label><input type="number" min="1" className="w-full p-2 border rounded dark:bg-slate-700" value={arrivalData.quantity} onChange={e => setArrivalData({...arrivalData, quantity: e.target.value})} /></div><div><label className="block text-sm mb-1">Prix Achat (CFA)</label><input type="number" step="1" className="w-full p-2 border rounded dark:bg-slate-700" value={arrivalData.purchasePrice} onChange={e => setArrivalData({...arrivalData, purchasePrice: e.target.value})} /></div><div><label className="block text-sm mb-1">Prix Vente (CFA)</label><input type="number" step="1" className="w-full p-2 border rounded dark:bg-slate-700" value={arrivalData.salePrice} onChange={e => setArrivalData({...arrivalData, salePrice: e.target.value})} /></div><div className="flex justify-end gap-2 pt-2"><button onClick={() => setShowArrivalModal(null)} className="px-4 py-2 text-gray-500 hover:bg-gray-100 rounded">Annuler</button><button onClick={handleArrival} className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700">Valider</button></div></div></div></div>)}
+                </div>
+            );
+        };
+
+        // ── DOCUMENTS ──
+        const Documents = () => {
+            const { documents, updateDocumentStatus, products } = useContext(AppContext);
+            const [searchTerm, setSearchTerm] = useState(""); const [selectedDocId, setSelectedDocId] = useState(null);
+            const selectedDoc = documents.find(d => d.id === selectedDocId);
+            return (
+                <div className="flex h-[calc(100vh-80px)] overflow-hidden relative">
+                    <div className={`flex-1 overflow-y-auto p-6 transition-all ${selectedDocId ? 'hidden md:block' : 'block'}`}><div className="space-y-6"><h2 className="text-2xl font-bold dark:text-white">Documents</h2><div className="relative"><Icon name="search" className="absolute left-3 top-3 text-gray-400" size={18} /><input type="text" placeholder="Rechercher..." className="w-full pl-10 pr-4 py-2 bg-white dark:bg-slate-800 border rounded-lg outline-none" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} /></div>
+                    <Card className="overflow-hidden p-0 shadow-none border-none"><table className="w-full text-sm text-left"><thead className="bg-gray-50 dark:bg-slate-700"><tr><th className="p-4">Réf</th><th className="p-4">Type</th><th className="p-4">Date</th><th className="p-4">Tiers</th><th className="p-4 text-right">Total</th><th className="p-4">Statut</th></tr></thead><tbody>
+                    {documents.filter(doc => doc.ref.toLowerCase().includes(searchTerm.toLowerCase())).map(doc => (<tr key={doc.id} className="hover:bg-blue-50 dark:hover:bg-slate-700/50 cursor-pointer border-b dark:border-slate-700">
+                        <td className="p-4 font-bold" onClick={() => setSelectedDocId(doc.id)}>{doc.ref}</td><td className="p-4" onClick={() => setSelectedDocId(doc.id)}><Badge color={doc.type === 'entry' ? 'yellow' : 'blue'}>{doc.type === 'entry' ? 'Entrée' : 'Sortie'}</Badge></td><td className="p-4" onClick={() => setSelectedDocId(doc.id)}>{new Date(doc.createdAt).toLocaleDateString()}</td><td className="p-4" onClick={() => setSelectedDocId(doc.id)}>{doc.clientName}</td><td className="p-4 text-right font-bold" onClick={() => setSelectedDocId(doc.id)}>{(doc.total || 0).toLocaleString()} CFA</td><td className="p-4" onClick={() => setSelectedDocId(doc.id)}><Badge color={doc.status === 'pending' ? 'yellow' : doc.status === 'validated' ? 'green' : 'red'}>{doc.status === 'pending' ? 'En attente' : doc.status === 'validated' ? 'Validé' : 'Annulé'}</Badge></td></tr>))}</tbody></table></Card></div></div>
+                    {selectedDoc && (<div id="drawer-content" className="fixed inset-y-0 right-0 w-full md:w-[650px] bg-white dark:bg-slate-800 shadow-2xl z-50 flex flex-col"><div className="p-6 border-b flex justify-between items-center"><h2 className="text-2xl font-bold dark:text-white">{selectedDoc.ref}</h2><button onClick={() => setSelectedDocId(null)}><Icon name="x" size={24} /></button></div><div className="p-6 flex-1 overflow-y-auto"><div className="flex justify-between mb-6"><div><h4 className="font-bold">Émetteur</h4><p>NID AUTO</p></div><div className="text-right"><h4 className="font-bold">{selectedDoc.type === 'entry' ? 'Fournisseur' : 'Client'}</h4><p>{selectedDoc.clientName}</p></div></div><div className="mb-4 flex gap-3 items-center"><Badge color={selectedDoc.type === 'entry' ? 'yellow' : 'blue'}>{selectedDoc.type === 'entry' ? 'Entrée Stock' : 'Sortie Stock'}</Badge>{selectedDoc.arrivalDate && <span className="text-sm text-gray-500">Date d'arrivage : {new Date(selectedDoc.arrivalDate).toLocaleDateString()}</span>}</div><table className="w-full text-sm mb-6"><thead><tr className="text-left border-b dark:border-slate-700"><th className="py-2">Article</th><th className="py-2">Catégorie</th><th className="py-2">Qté</th><th className="py-2 text-right">P.U.</th><th className="py-2 text-right">Total</th></tr></thead><tbody>{selectedDoc.items?.map((item, idx) => <tr key={idx} className="border-b dark:border-slate-700"><td className="py-2">{item.productName || 'N/A'}</td><td className="py-2">{item.categoryName || 'N/A'}</td><td className="py-2">{item.quantity}</td><td className="py-2 text-right">{(item.price || 0).toLocaleString()} CFA</td><td className="py-2 text-right font-bold">{(item.quantity * item.price).toLocaleString()} CFA</td></tr>)}</tbody></table><div className="text-right font-bold text-xl border-t dark:border-slate-700 pt-4">Total : {(selectedDoc.total || 0).toLocaleString()} CFA</div></div><div className="p-4 border-t flex justify-end gap-2 no-print"><button onClick={() => window.print()} className="flex items-center gap-2 px-4 py-2 bg-gray-100 dark:bg-slate-700 rounded"><Icon name="printer" size={16} /> Imprimer</button><select value={selectedDoc.status} onChange={e => updateDocumentStatus(selectedDoc.id, e.target.value)} className="border rounded px-3 py-2 dark:bg-slate-700"><option value="pending">En attente</option><option value="validated">Validé</option><option value="cancelled">Annulé</option></select></div></div>)}
+                </div>
+            );
+        };
+
+        // ── TRANSACTIONS ──
+        const TransactionForm = ({ type }) => {
+            const isEntry = type === 'entry';
+            const { products, categories, addNotification, addDocument, updateProductStock } = useContext(AppContext);
+            const [formData, setFormData] = useState({ productId: '', quantity: 1, price: 0, thirdParty: '' });
+            const handleSubmit = (e) => {
+                e.preventDefault(); const product = products.find(p => p.id == formData.productId); if (!product) return;
+                const qty = parseInt(formData.quantity); const price = parseFloat(formData.price); const total = qty * price; const newStock = isEntry ? product.stock + qty : product.stock - qty;
+                if (!isEntry && product.stock < qty) { addNotification("Stock insuffisant", "error"); return; }
+                updateProductStock(formData.productId, newStock); const ref = isEntry ? `ENT-${new Date().getFullYear()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}` : `DOC-${new Date().getFullYear()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+                const catName = categories.find(c => c.id === product.categoryId)?.name || 'N/A';
+                addDocument({ ref, type, clientName: formData.thirdParty || 'Divers', items: [{ productId: formData.productId, productName: product.name, categoryName: catName, quantity: qty, price }], total, arrivalDate: isEntry ? new Date().toISOString() : null });
+                addNotification(isEntry ? "Entrée enregistrée" : "Sortie enregistrée", "success"); setFormData({ productId: '', quantity: 1, price: 0, thirdParty: '' });
+            };
+            return (<div className="max-w-2xl mx-auto p-6 space-y-6"><h2 className="text-2xl font-bold dark:text-white">{isEntry ? "Entrée Stock" : "Sortie Stock"}</h2><Card><form onSubmit={handleSubmit} className="space-y-4"><div><label className="block text-sm mb-1">Produit</label><select required className="w-full p-2 border rounded dark:bg-slate-700" value={formData.productId} onChange={e => { const p = products.find(pr => pr.id == e.target.value); setFormData({...formData, productId: e.target.value, price: p ? p.salePrice : 0}); }}><option value="">Sélectionner</option>{products.map(p => <option key={p.id} value={p.id}>{p.name} (Stock: {p.stock})</option>)}</select></div><div className="grid grid-cols-2 gap-4"><div><label className="block text-sm mb-1">Quantité</label><input type="number" min="1" required className="w-full p-2 border rounded dark:bg-slate-700" value={formData.quantity} onChange={e => setFormData({...formData, quantity: e.target.value})} /></div><div><label className="block text-sm mb-1">Prix unitaire (CFA)</label><input type="number" step="1" className="w-full p-2 border rounded dark:bg-slate-700" value={formData.price} onChange={e => setFormData({...formData, price: e.target.value})} /></div></div><div><label className="block text-sm mb-1">{isEntry ? "Fournisseur" : "Client"}</label><input type="text" className="w-full p-2 border rounded dark:bg-slate-700" value={formData.thirdParty} onChange={e => setFormData({...formData, thirdParty: e.target.value})} /></div><button type="submit" className={`w-full py-3 rounded text-white font-bold ${isEntry ? 'bg-yellow-500 hover:bg-yellow-600' : 'bg-red-500 hover:bg-red-600'}`}>Valider</button></form></Card></div>);
+        };
+
+        // ── DASHBOARD ──
+        const Dashboard = () => {
+            const { documents, products, categories } = useContext(AppContext);
+            const revenue = documents.filter(d => d.type === 'out' && d.status === 'validated').reduce((s, d) => s + (d.total || 0), 0);
+            const lowProds = products.filter(p => p.stock <= p.minStock); const lowStock = lowProds.length;
+            const totalStockValue = products.reduce((s, p) => s + (p.stock * p.salePrice || 0), 0);
+            const chartRef1 = useRef(null); const chartRef2 = useRef(null); const ci1 = useRef(null); const ci2 = useRef(null);
+            useEffect(() => {
+                if (ci1.current) ci1.current.destroy(); const ctx1 = chartRef1.current.getContext('2d');
+                const catData = categories.map(c => ({ name: c.name, qty: products.filter(p => p.categoryId === c.id).reduce((s, p) => s + (parseInt(p.stock) || 0), 0) })).filter(c => c.qty > 0);
+                const cols = ['#3b82f6', '#10b981', '#f97316', '#ec4899', '#8b5cf6', '#eab308', '#14b8a6', '#ef4444', '#6366f1', '#84cc16']; const isDark = document.documentElement.classList.contains('dark');
+                ci1.current = new Chart(ctx1, { type: 'doughnut', data: { labels: catData.map(c => `${c.name} (${c.qty.toLocaleString()})`), datasets: [{ data: catData.map(c => c.qty), backgroundColor: cols.slice(0, catData.length), borderWidth: 0, hoverOffset: 12 }] }, options: { responsive: true, maintainAspectRatio: false, cutout: '65%', plugins: { legend: { position: 'bottom', labels: { color: isDark ? '#cbd5e1' : '#334155', font: { weight: 'bold', size: 12 }, padding: 14 } } } } });
+                if (ci2.current) ci2.current.destroy(); const ctx2 = chartRef2.current.getContext('2d'); const lowP = products.filter(p => p.stock <= p.minStock + 5).sort((a, b) => a.stock - b.stock).slice(0, 10);
+                ci2.current = new Chart(ctx2, { type: 'bar', data: { labels: lowP.map(p => p.name.substring(0, 18)), datasets: [{ label: 'Stock Actuel', data: lowP.map(p => p.stock), backgroundColor: lowP.map(p => p.stock <= p.minStock ? 'rgba(239,68,68,0.7)' : 'rgba(59,130,246,0.7)'), borderRadius: 4 }, { label: 'Stock Min', data: lowP.map(p => p.minStock), backgroundColor: 'rgba(241,245,249,0.5)', borderColor: 'rgba(100,116,139,0.5)', borderWidth: 1, borderRadius: 4 }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, grid: { color: isDark ? '#1e293b' : '#f1f5f9' }, ticks: { color: isDark ? '#cbd5e1' : '#334155' } }, x: { grid: { display: false }, ticks: { color: isDark ? '#cbd5e1' : '#334155' } } }, plugins: { legend: { labels: { color: isDark ? '#cbd5e1' : '#334155' } } } } });
+                return () => { if (ci1.current) ci1.current.destroy(); if (ci2.current) ci2.current.destroy(); };
+            }, [products, categories]);
+
+            return (<div className="p-6 space-y-6 h-[calc(100vh-80px)] overflow-y-auto"><h2 className="text-2xl font-bold dark:text-white">Tableau de Bord</h2><div className="grid grid-cols-1 md:grid-cols-4 gap-6"><Card><div className="text-2xl font-bold text-orange-600">{revenue.toLocaleString()} CFA</div><div className="text-sm text-gray-500">CA Sorties Validées</div></Card><Card><div className="text-2xl font-bold text-green-600">{products.length}</div><div className="text-sm text-gray-500">Total Articles</div></Card><Card><div className="flex items-center justify-between"><div><div className="text-2xl font-bold text-red-500 flex items-center gap-2">{lowStock}{lowStock > 0 && <Icon name="alert-triangle" size={20} className="blink-icon" />}</div><div className="text-sm text-gray-500">Alertes Stock</div></div></div></Card><Card><div className="text-2xl font-bold text-blue-600">{totalStockValue.toLocaleString()} CFA</div><div className="text-sm text-gray-500">Valeur Stock Total</div></Card></div><div className="grid grid-cols-1 lg:grid-cols-2 gap-6"><Card title="Répartition par Quantité"><div className="h-72 w-full"><canvas ref={chartRef1}></canvas></div></Card><Card title="Niveaux Critiques"><div className="h-72 w-full"><canvas ref={chartRef2}></canvas></div></Card></div></div>);
+        };
+
+        // ── SIDEBAR & LAYOUT ──
+        const Sidebar = () => {
+            const { activeModule, setActiveModule, darkMode, setDarkMode } = useContext(AppContext);
+            const items = [
+                { id: 'dashboard', label: 'Rapports', icon: 'layout-dashboard', color: 'text-modules-orange' },
+                { id: 'documents', label: 'Documents', icon: 'file-text', color: 'text-modules-blue' },
+                { id: 'stock', label: 'Marchandises', icon: 'box', color: 'text-modules-green' },
+                { id: 'entry', label: 'Entrée', icon: 'arrow-down-circle', color: 'text-modules-yellow' },
+                { id: 'exit', label: 'Sortie', icon: 'arrow-up-circle', color: 'text-modules-red' },
+                { id: 'demands', label: 'Demandes', icon: 'clipboard-list', color: 'text-modules-teal' },
+                { id: 'email', label: 'Email', icon: 'mail', color: 'text-modules-pink' }
+            ];
+            return (<aside className="w-20 lg:w-64 bg-slate-900 dark:bg-slate-950 flex flex-col h-screen fixed left-0 top-0 z-20 shadow-xl border-r border-slate-800"><div className="h-20 flex items-center justify-center lg:justify-start lg:px-6 border-b border-slate-800"><div className="w-10 h-10 bg-brand-accent rounded-xl flex items-center justify-center text-white font-bold text-lg shadow-lg shadow-blue-500/30">N</div><span className="font-extrabold text-xl hidden lg:block text-white ml-3 tracking-wider">NID AUTO</span></div><nav className="flex-1 overflow-y-auto py-6 space-y-2 px-3"><div className="hidden lg:block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 px-3">Menu</div>{items.map(it => (<button key={it.id} onClick={() => setActiveModule(it.id)} className={`w-full flex items-center px-3 py-3 rounded-xl transition-all duration-200 ${activeModule === it.id ? 'bg-brand-accent text-white shadow-lg shadow-blue-500/20' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}><Icon name={it.icon} size={22} className={activeModule === it.id ? 'text-white' : it.color} /><span className="ml-3 hidden lg:block font-medium text-sm">{it.label}</span></button>))}</nav><div className="p-4 border-t border-slate-800"><button onClick={() => setDarkMode(!darkMode)} className="w-full flex items-center justify-center lg:justify-start p-2 rounded-xl text-slate-500 hover:bg-slate-800 hover:text-slate-300 transition-colors"><Icon name={darkMode ? 'sun' : 'moon'} size={20} /><span className="ml-3 hidden lg:block text-sm">{darkMode ? 'Mode Clair' : 'Mode Sombre'}</span></button></div></aside>);
+        };
+
+        const MainLayout = () => {
+            const { activeModule } = useContext(AppContext);
+            const renderModule = () => {
+                switch (activeModule) {
+                    case 'dashboard': return <Dashboard />;
+                    case 'documents': return <Documents />;
+                    case 'stock': return <Merchandise />;
+                    case 'entry': return <TransactionForm type="entry" />;
+                    case 'exit': return <TransactionForm type="exit" />;
+                    case 'demands': return <Demands />;
+                    case 'email': return <EmailCenter />;
+                    default: return <Dashboard />;
+                }
+            };
+            return (
+                <div className="flex min-h-screen bg-gray-50 dark:bg-slate-900 transition-colors">
+                    <Sidebar />
+                    <main className="flex-1 ml-20 lg:ml-64 transition-all duration-300">
+                        <ToastContainer />
+                        {renderModule()}
+                    </main>
+                </div>
+            );
+        };
+
+        const App = () => <AppProvider><MainLayout /></AppProvider>;
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>
