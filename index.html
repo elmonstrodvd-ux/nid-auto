@@ -30,6 +30,8 @@
         .blink-icon { animation: blink-alert 0.8s cubic-bezier(0.4, 0, 0.6, 1) infinite; color: #ef4444; }
         @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
         .slide-up { animation: slideUp 0.25s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .fade-in { animation: fadeIn 0.2s ease-out; }
         @media print { body * { visibility: hidden; } #drawer-content, #drawer-content * { visibility: visible; } #drawer-content { position: absolute; left: 0; top: 0; width: 100%; } .no-print { display: none !important; } }
     </style>
 </head>
@@ -73,7 +75,8 @@
             const addNotification = (msg, type = 'info') => { const id = Date.now(); setNotifications(prev => [...prev, { id, msg, type }]); setTimeout(() => setNotifications(prev => prev.filter(n => n.id !== id)), 3500); };
             const generateSKU = (catId) => { if (!catId) return ''; const cat = categories.find(c => c.id === catId); if (!cat) return ''; const w = cat.name.split(' ').filter(x => x.length > 0); let pfx = w.length >= 2 ? w[0].substring(0, 4).toUpperCase() + '-' + w[1].substring(0, 4).toUpperCase() : w[0].substring(0, 4).toUpperCase(); return `${pfx}-${(products.filter(p => p.categoryId === catId).length + 1).toString().padStart(4, '0')}`; };
 
-            const addProduct = async (d) => { try { await db.collection('products').add({...d, stock: parseInt(d.stock), minStock: parseInt(d.minStock), purchasePrice: parseFloat(d.purchasePrice), salePrice: parseFloat(d.salePrice), createdAt: firebase.firestore.FieldValue.serverTimestamp() }); addNotification("Produit ajouté", "success"); } catch(e) { console.error(e); } };
+            // CORRECTION : addProduct retourne maintenant la référence du document
+            const addProduct = async (d) => { try { const docRef = await db.collection('products').add({...d, stock: parseInt(d.stock), minStock: parseInt(d.minStock), purchasePrice: parseFloat(d.purchasePrice), salePrice: parseFloat(d.salePrice), createdAt: firebase.firestore.FieldValue.serverTimestamp() }); addNotification("Produit ajouté", "success"); return docRef; } catch(e) { console.error(e); return null; } };
             const updateProduct = async (id, d) => { try { await db.collection('products').doc(id).update({...d, stock: parseInt(d.stock), minStock: parseInt(d.minStock), purchasePrice: parseFloat(d.purchasePrice), salePrice: parseFloat(d.salePrice)}); addNotification("Produit mis à jour", "success"); } catch(e) { console.error(e); } };
             const deleteProduct = async (id) => { try { await db.collection('products').doc(id).delete(); addNotification("Produit supprimé", "success"); } catch(e) { console.error(e); } };
             const updateProductStock = (pid, ns) => db.collection('products').doc(pid).update({ stock: ns });
@@ -82,22 +85,86 @@
             const deleteCategory = async (id) => { try { await db.collection('categories').doc(id).delete(); addNotification("Catégorie supprimée", "success"); } catch(e) { console.error(e); } };
             const addDocument = async (d) => { try { await db.collection('documents').add({...d, status: 'pending', createdAt: firebase.firestore.FieldValue.serverTimestamp()}); addNotification("Document généré", "success"); } catch(e) { console.error(e); } };
 
+            // FONCTION UTILITAIRE : ajuster le stock pour une liste d'items
+            const adjustStockForItems = async (items, docType, direction) => {
+                for (const item of (items || [])) {
+                    if (!item.productId) continue;
+                    const pRef = db.collection('products').doc(item.productId);
+                    const pSnap = await pRef.get();
+                    if (pSnap.exists) {
+                        const cur = pSnap.data().stock || 0;
+                        const qty = parseInt(item.quantity) || 0;
+                        if (direction === 'revert') {
+                            // Annuler l'effet du document
+                            if (docType === 'exit') await pRef.update({ stock: cur + qty });
+                            if (docType === 'entry') await pRef.update({ stock: Math.max(0, cur - qty) });
+                        } else {
+                            // Appliquer l'effet du document
+                            if (docType === 'exit') await pRef.update({ stock: Math.max(0, cur - qty) });
+                            if (docType === 'entry') await pRef.update({ stock: cur + qty });
+                        }
+                    }
+                }
+            };
+
+            // CORRECTION PRINCIPALE : 'out' remplacé par 'exit' partout
             const updateDocumentStatus = async (id, newStatus) => {
                 try {
                     const docSnap = await db.collection('documents').doc(id).get();
                     if (!docSnap.exists) return;
                     const data = docSnap.data(); const oldStatus = data.status;
+
+                    // Annulation : reverser le stock si le doc était actif
                     if (newStatus === 'cancelled' && oldStatus !== 'cancelled') {
-                        for (const item of (data.items || [])) { if (!item.productId) continue; const pRef = db.collection('products').doc(item.productId); const pSnap = await pRef.get(); if (pSnap.exists) { const cur = pSnap.data().stock || 0; const qty = parseInt(item.quantity) || 0; if (data.type === 'out') await pRef.update({ stock: cur + qty }); if (data.type === 'entry') await pRef.update({ stock: Math.max(0, cur - qty) }); } }
+                        await adjustStockForItems(data.items, data.type, 'revert');
                         addNotification("Document annulé — stock reversé", "success");
                     }
+
+                    // Revalidation après annulation : réappliquer le stock
                     if (newStatus === 'validated' && oldStatus === 'cancelled') {
-                        for (const item of (data.items || [])) { if (!item.productId) continue; const pRef = db.collection('products').doc(item.productId); const pSnap = await pRef.get(); if (pSnap.exists) { const cur = pSnap.data().stock || 0; const qty = parseInt(item.quantity) || 0; if (data.type === 'out') await pRef.update({ stock: Math.max(0, cur - qty) }); if (data.type === 'entry') await pRef.update({ stock: cur + qty }); } }
+                        await adjustStockForItems(data.items, data.type, 'apply');
                         addNotification("Document revalidé — stock ajusté", "success");
                     }
+
                     if (newStatus === 'validated' && oldStatus === 'pending') addNotification("Document validé", "success");
+
                     await db.collection('documents').doc(id).update({ status: newStatus });
                 } catch(e) { console.error(e); addNotification("Erreur de mise à jour", "error"); }
+            };
+
+            // NOUVEAU : Supprimer un document avec reversion du stock
+            const deleteDocument = async (id) => {
+                try {
+                    const docSnap = await db.collection('documents').doc(id).get();
+                    if (!docSnap.exists) return;
+                    const data = docSnap.data();
+
+                    // Si le document n'est pas annulé, reverser le stock avant suppression
+                    if (data.status !== 'cancelled') {
+                        await adjustStockForItems(data.items, data.type, 'revert');
+                    }
+
+                    await db.collection('documents').doc(id).delete();
+                    addNotification("Document supprimé — stock ajusté", "success");
+                } catch(e) { console.error(e); addNotification("Erreur de suppression", "error"); }
+            };
+
+            // NOUVEAU : Modifier un document avec ajustement du stock
+            const editDocument = async (id, updates, originalItems) => {
+                try {
+                    const docSnap = await db.collection('documents').doc(id).get();
+                    if (!docSnap.exists) return;
+                    const data = docSnap.data();
+
+                    // Si le document est actif, on reverte l'ancien stock puis applique le nouveau
+                    if (data.status !== 'cancelled') {
+                        await adjustStockForItems(originalItems, data.type, 'revert');
+                        await adjustStockForItems(updates.items, data.type, 'apply');
+                    }
+
+                    await db.collection('documents').doc(id).update(updates);
+                    addNotification("Document modifié — stock ajusté", "success");
+                } catch(e) { console.error(e); addNotification("Erreur de modification", "error"); }
             };
 
             const addDemand = async (d) => { try { await db.collection('demands').add({...d, status: 'pending', createdAt: firebase.firestore.FieldValue.serverTimestamp()}); addNotification("Demande ajoutée", "success"); } catch(e) { console.error(e); } };
@@ -118,7 +185,7 @@
             };
 
             return (
-                <AppContext.Provider value={{ activeModule, setActiveModule, darkMode, setDarkMode, products, addProduct, updateProduct, deleteProduct, updateProductStock, generateSKU, categories, addCategory, updateCategory, deleteCategory, documents, addDocument, updateDocumentStatus, demands, addDemand, updateDemand, deleteDemand, notifications, emailConfig, saveEmailConfig, sendEmail }}>
+                <AppContext.Provider value={{ activeModule, setActiveModule, darkMode, setDarkMode, products, addProduct, updateProduct, deleteProduct, updateProductStock, generateSKU, categories, addCategory, updateCategory, deleteCategory, documents, addDocument, updateDocumentStatus, deleteDocument, editDocument, demands, addDemand, updateDemand, deleteDemand, notifications, emailConfig, saveEmailConfig, sendEmail }}>
                     {children}
                 </AppContext.Provider>
             );
@@ -206,9 +273,8 @@
             );
         };
 
-        // ── MARCHANDISES (CORRECTION GROUPES) ──
+        // ── MARCHANDISES ──
         const Merchandise = () => {
-            // CORRECTION ICI : Ajout de addCategory, updateCategory, deleteCategory
             const { products, categories, addProduct, updateProduct, deleteProduct, generateSKU, addCategory, updateCategory, deleteCategory } = useContext(AppContext);
             const [searchTerm, setSearchTerm] = useState(""); const [showModal, setShowModal] = useState(false); const [showCatModal, setShowCatModal] = useState(false); const [editingProduct, setEditingProduct] = useState(null); const [newCatName, setNewCatName] = useState('');
             const emptyForm = { sku: '', name: '', categoryId: '', purchasePrice: '', salePrice: '', stock: 0, minStock: 5, image: '' };
@@ -252,13 +318,39 @@
             const handleImageChange = (e) => { const f = e.target.files[0]; if (f) { const r = new FileReader(); r.onloadend = () => setFormData({...formData, image: r.result}); r.readAsDataURL(f); } };
             const handleSubmit = (e) => { e.preventDefault(); if (editingDemand) { updateDemand(editingDemand.id, formData); } else { addDemand(formData); } setShowModal(false); setFormData(emptyForm); setEditingDemand(null); };
             const openEdit = (d) => { setEditingDemand(d); setFormData(d); setShowModal(true); };
-            const handleArrival = () => {
-                if (!showArrivalModal) return; const d = showArrivalModal; const catName = categories.find(c => c.id === d.categoryId)?.name || 'N/A'; const price = parseFloat(arrivalData.salePrice) || 0; const qty = parseInt(arrivalData.quantity) || 1;
-                addProduct({ name: d.partName, categoryId: d.categoryId, sku: generateSKU(d.categoryId), purchasePrice: parseFloat(arrivalData.purchasePrice), salePrice: price, stock: qty, minStock: 1, image: d.image });
-                addDocument({ ref: `ENT-${new Date().getFullYear()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`, type: 'entry', clientName: d.clientName || 'Divers', items: [{ productName: d.partName, categoryName: catName, quantity: qty, price }], total: qty * price, arrivalDate: new Date().toISOString() });
+
+            // CORRECTION : handleArrival attend la création du produit pour récupérer l'ID
+            const handleArrival = async () => {
+                if (!showArrivalModal) return;
+                const d = showArrivalModal;
+                const catName = categories.find(c => c.id === d.categoryId)?.name || 'N/A';
+                const price = parseFloat(arrivalData.salePrice) || 0;
+                const qty = parseInt(arrivalData.quantity) || 1;
+
+                // Créer le produit et attendre la référence
+                const productRef = await addProduct({
+                    name: d.partName, categoryId: d.categoryId, sku: generateSKU(d.categoryId),
+                    purchasePrice: parseFloat(arrivalData.purchasePrice), salePrice: price,
+                    stock: qty, minStock: 1, image: d.image
+                });
+
+                const productId = productRef ? productRef.id : null;
+
+                // Inclure le productId dans le document pour permettre la reversion du stock
+                addDocument({
+                    ref: `ENT-${new Date().getFullYear()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`,
+                    type: 'entry',
+                    clientName: d.clientName || 'Divers',
+                    items: [{ productId, productName: d.partName, categoryName: catName, quantity: qty, price }],
+                    total: qty * price,
+                    arrivalDate: new Date().toISOString()
+                });
+
                 updateDemand(d.id, { status: 'arrived' });
-                setShowArrivalModal(null); addNotification("Pièce ajoutée au stock", "success");
+                setShowArrivalModal(null);
+                addNotification("Pièce ajoutée au stock", "success");
             };
+
             return (
                 <div className="p-6 space-y-6 h-[calc(100vh-80px)] overflow-y-auto">
                     <div className="flex flex-col md:flex-row justify-between md:items-center gap-4"><h2 className="text-2xl font-bold dark:text-white flex items-center gap-2"><Icon name="clipboard-list" size={28} className="text-modules-teal" /> Demandes</h2><button onClick={() => { setEditingDemand(null); setFormData(emptyForm); setShowModal(true); }} className="flex items-center gap-2 px-4 py-2 bg-modules-teal text-white rounded-lg hover:bg-teal-700 shadow-md"><Icon name="plus-circle" size={18} /> Nouvelle</button></div>
@@ -275,18 +367,161 @@
             );
         };
 
-        // ── DOCUMENTS ──
+        // ── DOCUMENTS (AVEC SUPPRESSION ET MODIFICATION) ──
         const Documents = () => {
-            const { documents, updateDocumentStatus, products } = useContext(AppContext);
-            const [searchTerm, setSearchTerm] = useState(""); const [selectedDocId, setSelectedDocId] = useState(null);
+            const { documents, updateDocumentStatus, deleteDocument, editDocument, products, categories, addNotification } = useContext(AppContext);
+            const [searchTerm, setSearchTerm] = useState("");
+            const [selectedDocId, setSelectedDocId] = useState(null);
+            const [showEditModal, setShowEditModal] = useState(false);
+            const [editData, setEditData] = useState({ clientName: '', items: [], originalItems: [] });
+            const [addItemSelector, setAddItemSelector] = useState('');
+
             const selectedDoc = documents.find(d => d.id === selectedDocId);
+
+            // Ouvrir le modal de modification
+            const openEditModal = () => {
+                if (!selectedDoc) return;
+                setEditData({
+                    clientName: selectedDoc.clientName || '',
+                    items: (selectedDoc.items || []).map(item => ({...item})),
+                    originalItems: (selectedDoc.items || []).map(item => ({...item}))
+                });
+                setShowEditModal(true);
+            };
+
+            // Modifier un item dans la liste
+            const updateEditItem = (index, field, value) => {
+                const newItems = [...editData.items];
+                newItems[index] = { ...newItems[index], [field]: field === 'quantity' ? parseInt(value) || 0 : field === 'price' ? parseFloat(value) || 0 : value };
+                setEditData({...editData, items: newItems});
+            };
+
+            // Supprimer un item de la liste d'édition
+            const removeEditItem = (index) => {
+                const newItems = editData.items.filter((_, i) => i !== index);
+                setEditData({...editData, items: newItems});
+            };
+
+            // Ajouter un item depuis le sélecteur de produit
+            const addNewItem = () => {
+                const product = products.find(p => p.id === addItemSelector);
+                if (!product) return;
+                const catName = categories.find(c => c.id === product.categoryId)?.name || 'N/A';
+                const newItems = [...editData.items, {
+                    productId: product.id,
+                    productName: product.name,
+                    categoryName: catName,
+                    quantity: 1,
+                    price: product.salePrice || 0
+                }];
+                setEditData({...editData, items: newItems});
+                setAddItemSelector('');
+            };
+
+            // Sauvegarder les modifications
+            const handleEditSave = async () => {
+                const total = editData.items.reduce((s, i) => s + (i.quantity * i.price), 0);
+                await editDocument(selectedDocId, {
+                    clientName: editData.clientName,
+                    items: editData.items,
+                    total
+                }, editData.originalItems);
+                setShowEditModal(false);
+            };
+
+            // Confirmer la suppression
+            const handleDelete = async () => {
+                if (confirm('Supprimer ce document ? Le stock sera ajusté automatiquement.')) {
+                    await deleteDocument(selectedDocId);
+                    setSelectedDocId(null);
+                }
+            };
+
             return (
                 <div className="flex h-[calc(100vh-80px)] overflow-hidden relative">
+                    {/* Liste des documents */}
                     <div className={`flex-1 overflow-y-auto p-6 transition-all ${selectedDocId ? 'hidden md:block' : 'block'}`}><div className="space-y-6"><h2 className="text-2xl font-bold dark:text-white">Documents</h2><div className="relative"><Icon name="search" className="absolute left-3 top-3 text-gray-400" size={18} /><input type="text" placeholder="Rechercher..." className="w-full pl-10 pr-4 py-2 bg-white dark:bg-slate-800 border rounded-lg outline-none" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} /></div>
                     <Card className="overflow-hidden p-0 shadow-none border-none"><table className="w-full text-sm text-left"><thead className="bg-gray-50 dark:bg-slate-700"><tr><th className="p-4">Réf</th><th className="p-4">Type</th><th className="p-4">Date</th><th className="p-4">Tiers</th><th className="p-4 text-right">Total</th><th className="p-4">Statut</th></tr></thead><tbody>
                     {documents.filter(doc => doc.ref.toLowerCase().includes(searchTerm.toLowerCase())).map(doc => (<tr key={doc.id} className="hover:bg-blue-50 dark:hover:bg-slate-700/50 cursor-pointer border-b dark:border-slate-700">
                         <td className="p-4 font-bold" onClick={() => setSelectedDocId(doc.id)}>{doc.ref}</td><td className="p-4" onClick={() => setSelectedDocId(doc.id)}><Badge color={doc.type === 'entry' ? 'yellow' : 'blue'}>{doc.type === 'entry' ? 'Entrée' : 'Sortie'}</Badge></td><td className="p-4" onClick={() => setSelectedDocId(doc.id)}>{new Date(doc.createdAt).toLocaleDateString()}</td><td className="p-4" onClick={() => setSelectedDocId(doc.id)}>{doc.clientName}</td><td className="p-4 text-right font-bold" onClick={() => setSelectedDocId(doc.id)}>{(doc.total || 0).toLocaleString()} CFA</td><td className="p-4" onClick={() => setSelectedDocId(doc.id)}><Badge color={doc.status === 'pending' ? 'yellow' : doc.status === 'validated' ? 'green' : 'red'}>{doc.status === 'pending' ? 'En attente' : doc.status === 'validated' ? 'Validé' : 'Annulé'}</Badge></td></tr>))}</tbody></table></Card></div></div>
-                    {selectedDoc && (<div id="drawer-content" className="fixed inset-y-0 right-0 w-full md:w-[650px] bg-white dark:bg-slate-800 shadow-2xl z-50 flex flex-col"><div className="p-6 border-b flex justify-between items-center"><h2 className="text-2xl font-bold dark:text-white">{selectedDoc.ref}</h2><button onClick={() => setSelectedDocId(null)}><Icon name="x" size={24} /></button></div><div className="p-6 flex-1 overflow-y-auto"><div className="flex justify-between mb-6"><div><h4 className="font-bold">Émetteur</h4><p>NID AUTO</p></div><div className="text-right"><h4 className="font-bold">{selectedDoc.type === 'entry' ? 'Fournisseur' : 'Client'}</h4><p>{selectedDoc.clientName}</p></div></div><div className="mb-4 flex gap-3 items-center"><Badge color={selectedDoc.type === 'entry' ? 'yellow' : 'blue'}>{selectedDoc.type === 'entry' ? 'Entrée Stock' : 'Sortie Stock'}</Badge>{selectedDoc.arrivalDate && <span className="text-sm text-gray-500">Date d'arrivage : {new Date(selectedDoc.arrivalDate).toLocaleDateString()}</span>}</div><table className="w-full text-sm mb-6"><thead><tr className="text-left border-b dark:border-slate-700"><th className="py-2">Article</th><th className="py-2">Catégorie</th><th className="py-2">Qté</th><th className="py-2 text-right">P.U.</th><th className="py-2 text-right">Total</th></tr></thead><tbody>{selectedDoc.items?.map((item, idx) => <tr key={idx} className="border-b dark:border-slate-700"><td className="py-2">{item.productName || 'N/A'}</td><td className="py-2">{item.categoryName || 'N/A'}</td><td className="py-2">{item.quantity}</td><td className="py-2 text-right">{(item.price || 0).toLocaleString()} CFA</td><td className="py-2 text-right font-bold">{(item.quantity * item.price).toLocaleString()} CFA</td></tr>)}</tbody></table><div className="text-right font-bold text-xl border-t dark:border-slate-700 pt-4">Total : {(selectedDoc.total || 0).toLocaleString()} CFA</div></div><div className="p-4 border-t flex justify-end gap-2 no-print"><button onClick={() => window.print()} className="flex items-center gap-2 px-4 py-2 bg-gray-100 dark:bg-slate-700 rounded"><Icon name="printer" size={16} /> Imprimer</button><select value={selectedDoc.status} onChange={e => updateDocumentStatus(selectedDoc.id, e.target.value)} className="border rounded px-3 py-2 dark:bg-slate-700"><option value="pending">En attente</option><option value="validated">Validé</option><option value="cancelled">Annulé</option></select></div></div>)}
+
+                    {/* Panneau de détail du document */}
+                    {selectedDoc && (<div id="drawer-content" className="fixed inset-y-0 right-0 w-full md:w-[650px] bg-white dark:bg-slate-800 shadow-2xl z-50 flex flex-col fade-in"><div className="p-6 border-b flex justify-between items-center"><h2 className="text-2xl font-bold dark:text-white">{selectedDoc.ref}</h2><button onClick={() => setSelectedDocId(null)}><Icon name="x" size={24} /></button></div><div className="p-6 flex-1 overflow-y-auto"><div className="flex justify-between mb-6"><div><h4 className="font-bold">Émetteur</h4><p>NID AUTO</p></div><div className="text-right"><h4 className="font-bold">{selectedDoc.type === 'entry' ? 'Fournisseur' : 'Client'}</h4><p>{selectedDoc.clientName}</p></div></div><div className="mb-4 flex gap-3 items-center"><Badge color={selectedDoc.type === 'entry' ? 'yellow' : 'blue'}>{selectedDoc.type === 'entry' ? 'Entrée Stock' : 'Sortie Stock'}</Badge>{selectedDoc.arrivalDate && <span className="text-sm text-gray-500">Date d'arrivage : {new Date(selectedDoc.arrivalDate).toLocaleDateString()}</span>}</div><table className="w-full text-sm mb-6"><thead><tr className="text-left border-b dark:border-slate-700"><th className="py-2">Article</th><th className="py-2">Catégorie</th><th className="py-2">Qté</th><th className="py-2 text-right">P.U.</th><th className="py-2 text-right">Total</th></tr></thead><tbody>{selectedDoc.items?.map((item, idx) => <tr key={idx} className="border-b dark:border-slate-700"><td className="py-2">{item.productName || 'N/A'}</td><td className="py-2">{item.categoryName || 'N/A'}</td><td className="py-2">{item.quantity}</td><td className="py-2 text-right">{(item.price || 0).toLocaleString()} CFA</td><td className="py-2 text-right font-bold">{(item.quantity * item.price).toLocaleString()} CFA</td></tr>)}</tbody></table><div className="text-right font-bold text-xl border-t dark:border-slate-700 pt-4">Total : {(selectedDoc.total || 0).toLocaleString()} CFA</div></div>
+
+                    {/* Barre d'actions du document */}
+                    <div className="p-4 border-t flex flex-wrap justify-between gap-2 no-print">
+                        <div className="flex gap-2">
+                            <button onClick={() => window.print()} className="flex items-center gap-2 px-4 py-2 bg-gray-100 dark:bg-slate-700 rounded hover:bg-gray-200 dark:hover:bg-slate-600"><Icon name="printer" size={16} /> Imprimer</button>
+                            <button onClick={openEditModal} className="flex items-center gap-2 px-4 py-2 bg-amber-500 text-white rounded hover:bg-amber-600"><Icon name="edit" size={16} /> Modifier</button>
+                            <button onClick={handleDelete} className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700"><Icon name="trash-2" size={16} /> Supprimer</button>
+                        </div>
+                        <select value={selectedDoc.status} onChange={e => updateDocumentStatus(selectedDoc.id, e.target.value)} className="border rounded px-3 py-2 dark:bg-slate-700 dark:border-slate-600"><option value="pending">En attente</option><option value="validated">Validé</option><option value="cancelled">Annulé</option></select>
+                    </div></div>)}
+
+                    {/* Modal de modification du document */}
+                    {showEditModal && (
+                        <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4 backdrop-blur-sm">
+                            <div className="bg-white dark:bg-slate-800 rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto">
+                                <div className="p-6 border-b dark:border-slate-700 flex justify-between items-center">
+                                    <h3 className="text-xl font-bold dark:text-white">Modifier le Document</h3>
+                                    <button onClick={() => setShowEditModal(false)}><Icon name="x" size={24} className="text-gray-400" /></button>
+                                </div>
+                                <div className="p-6 space-y-4">
+                                    {/* Nom du tiers */}
+                                    <div>
+                                        <label className="block text-sm font-medium mb-1">{selectedDoc?.type === 'entry' ? 'Fournisseur' : 'Client'}</label>
+                                        <input type="text" className="w-full p-2.5 border border-gray-300 dark:border-slate-600 rounded-lg dark:bg-slate-700 outline-none focus:ring-2 focus:ring-blue-500" value={editData.clientName} onChange={e => setEditData({...editData, clientName: e.target.value})} />
+                                    </div>
+
+                                    {/* Liste des articles modifiables */}
+                                    <div>
+                                        <label className="block text-sm font-medium mb-2">Articles</label>
+                                        <div className="space-y-2">
+                                            {editData.items.map((item, idx) => (
+                                                <div key={idx} className="flex items-center gap-2 bg-gray-50 dark:bg-slate-700 p-3 rounded-lg">
+                                                    <span className="flex-1 font-medium text-sm dark:text-white">{item.productName}</span>
+                                                    <span className="text-xs text-gray-500 w-24 hidden sm:block">{item.categoryName}</span>
+                                                    <div className="flex items-center gap-1">
+                                                        <label className="text-xs text-gray-500">Qté:</label>
+                                                        <input type="number" min="1" className="w-16 p-1.5 border rounded dark:bg-slate-600 dark:border-slate-500 text-sm text-center" value={item.quantity} onChange={e => updateEditItem(idx, 'quantity', e.target.value)} />
+                                                    </div>
+                                                    <div className="flex items-center gap-1">
+                                                        <label className="text-xs text-gray-500">P.U:</label>
+                                                        <input type="number" step="1" className="w-24 p-1.5 border rounded dark:bg-slate-600 dark:border-slate-500 text-sm text-right" value={item.price} onChange={e => updateEditItem(idx, 'price', e.target.value)} />
+                                                    </div>
+                                                    <span className="w-24 text-right font-bold text-sm dark:text-white">{(item.quantity * item.price).toLocaleString()} CFA</span>
+                                                    <button onClick={() => removeEditItem(idx)} className="p-1.5 text-red-500 hover:bg-red-50 dark:hover:bg-slate-600 rounded"><Icon name="trash-2" size={14} /></button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    {/* Ajouter un nouvel article */}
+                                    <div className="border-t dark:border-slate-700 pt-4">
+                                        <label className="block text-sm font-medium mb-2">Ajouter un article</label>
+                                        <div className="flex gap-2">
+                                            <select className="flex-1 p-2 border rounded-lg dark:bg-slate-700 dark:border-slate-600 outline-none text-sm" value={addItemSelector} onChange={e => setAddItemSelector(e.target.value)}>
+                                                <option value="">Choisir un produit...</option>
+                                                {products.map(p => <option key={p.id} value={p.id}>{p.name} (Stock: {p.stock})</option>)}
+                                            </select>
+                                            <button onClick={addNewItem} disabled={!addItemSelector} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 text-sm font-medium">Ajouter</button>
+                                        </div>
+                                    </div>
+
+                                    {/* Total recalculé */}
+                                    <div className="border-t dark:border-slate-700 pt-4 text-right">
+                                        <span className="text-lg font-bold dark:text-white">Nouveau Total : {editData.items.reduce((s, i) => s + (i.quantity * i.price), 0).toLocaleString()} CFA</span>
+                                    </div>
+
+                                    {/* Boutons d'action */}
+                                    <div className="flex justify-end gap-2 pt-2">
+                                        <button onClick={() => setShowEditModal(false)} className="px-4 py-2 text-gray-500 hover:bg-gray-100 dark:hover:bg-slate-700 rounded">Annuler</button>
+                                        <button onClick={handleEditSave} className="px-6 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 font-bold">Enregistrer les modifications</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </div>
             );
         };
@@ -311,7 +546,8 @@
         // ── DASHBOARD ──
         const Dashboard = () => {
             const { documents, products, categories } = useContext(AppContext);
-            const revenue = documents.filter(d => d.type === 'out' && d.status === 'validated').reduce((s, d) => s + (d.total || 0), 0);
+            // CORRECTION : 'out' remplacé par 'exit' pour correspondre au type stocké
+            const revenue = documents.filter(d => d.type === 'exit' && d.status === 'validated').reduce((s, d) => s + (d.total || 0), 0);
             const lowProds = products.filter(p => p.stock <= p.minStock); const lowStock = lowProds.length;
             const totalStockValue = products.reduce((s, p) => s + (p.stock * p.salePrice || 0), 0);
             const chartRef1 = useRef(null); const chartRef2 = useRef(null); const ci1 = useRef(null); const ci2 = useRef(null);
